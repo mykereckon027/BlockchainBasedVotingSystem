@@ -173,8 +173,7 @@ Contributions are welcome! Feel free to open issues or pull requests for bug fix
   ## License
 **This project is licensed under the MIT License — see the LICENSE file for details.**
 
-##Final Notes
-
+## Final Notes
 **This project aims to provide a clear example of building a secure and functional voting dApp backend using Solidity and Foundry.**
 **It’s great for learning, demoing, or building upon for more complex election or governance systems.**
 
