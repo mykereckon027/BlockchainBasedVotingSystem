@@ -12,3 +12,9 @@ docs/
 
 # Dotenv file
 .env
+
+out/
+cache/
+broadcast/
+foundry.toml.lock
+.env
