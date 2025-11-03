@@ -2,11 +2,11 @@
 pragma solidity ^0.8.18;
 
 /**
- * @title BlockchainVoting
+ * @title VotingSystem 
  * @notice Simple on-chain voting contract with phases, events, and protections
  * @dev Owner manages candidates and election lifecycle. Voters register themselves.
  */
-contract BlockchainVoting {
+contract VotingSystem {
     /*//////////////////////////////////////////////////////////////
                                DATA STRUCTURES
     //////////////////////////////////////////////////////////////*/
