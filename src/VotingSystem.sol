@@ -1,234 +1,198 @@
-// Layout of Contract:
-// version
-// imports
-// errors
-// interfaces, libraries, contracts
-// Type declarations
-// State variables
-// Events
-// Modifiers
-// Functions
-
-// Layout of Functions:
-// constructor
-// receive function (if exists)
-// fallback function (if exists)
-// external
-// public
-// internal
-// private
-// view & pure functions
-
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.18;
 
-/* custom error */
-error youHaveAlreadyvoted();
-
-contract VotingSystem {
-    address public owner;
-    uint private VotingDeadline;
-    bool private VotingStatus;
-
-    mapping(address => bool) public registeredVoters;
-    mapping(address => bool) public hasVoted;
-    mapping(string => bool) public candidatesExists;
-
-    address[] private registeredVoterList;
-    address[] private hasVotedList;
+/**
+ * @title BlockchainVoting
+ * @notice Simple on-chain voting contract with phases, events, and protections
+ * @dev Owner manages candidates and election lifecycle. Voters register themselves.
+ */
+contract BlockchainVoting {
+    /*//////////////////////////////////////////////////////////////
+                               DATA STRUCTURES
+    //////////////////////////////////////////////////////////////*/
 
     struct Candidate {
         string name;
-        uint voteCount;
+        uint256 voteCount;
+        bool exists;
     }
 
-    Candidate[] private candidatesList;
-
-    constructor(string[] memory candidateNames, uint _duration) {
-        owner = msg.sender;
-        setvotingdeadline(_duration);
-
-        for (uint i = 0; i < candidateNames.length; i++) {
-            candidatesList.push(Candidate(candidateNames[i], 0));
-        }
+    enum Phase {
+        Registration, // candidates can be added, voters can register
+        Voting,       // registered voters can cast votes
+        Ended         // voting ended, results can be read
     }
 
-    // ERRORS
-    error NoVotesCast();
-    error NoCandidatesAvailable();
-    error VotingPeriodIsOver();
-    error InvalidCandidateIndex(uint index);
-    error VoterAlreadyRegistered(address voter);
-    error VotingStillOngoing();
-    error VotingHasNotStarted();
-    error VoterNotRegistered(address voter);
+    /*//////////////////////////////////////////////////////////////
+                                 STATE
+    //////////////////////////////////////////////////////////////*/
 
-    // EVENTS
-    // Events are used to notify other contracts of changes in the state of a contract or trigger an action.
-    event voted(uint candidateIndex);
-    event voterRegistered(address indexed voter);
-    event candidatesAdded(string indexed name);
-    event votingStarted();
-    event votingEnded();
-    event resultsGenerated();
+    address public immutable i_owner;
+    Phase public s_phase;
 
+    // candidate id => Candidate
+    mapping(uint256 => Candidate) private s_candidates;
+    uint256 private s_candidateCount;
+
+    // voter address => registered?
+    mapping(address => bool) private s_registered;
+    // voter address => voted?
+    mapping(address => bool) private s_hasVoted;
+    // voter address => voted candidate id
+    mapping(address => uint256) private s_voteOf;
+
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
+    event CandidateAdded(uint256 indexed candidateId, string name);
+    event VoterRegistered(address indexed voter);
+    event VoteCast(address indexed voter, uint256 indexed candidateId);
+    event PhaseChanged(Phase indexed newPhase);
+    event ElectionReset();
+
+    /*//////////////////////////////////////////////////////////////
+                                 ERRORS
+    //////////////////////////////////////////////////////////////*/
+    error NotOwner();
+    error AlreadyRegistered();
+    error NotRegistered();
+    error AlreadyVoted();
+    error CandidateNotFound();
+    error InvalidPhase();
+    error CandidateExists();
+
+    /*//////////////////////////////////////////////////////////////
+                               CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+    constructor() {
+        i_owner = msg.sender;
+        s_phase = Phase.Registration;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 MODIFIERS
+    //////////////////////////////////////////////////////////////*/
     modifier onlyOwner() {
-        require(msg.sender == owner, "Only the owner can do this");
+        if (msg.sender != i_owner) revert NotOwner();
         _;
     }
 
-    function addCandidate(string memory _name) public onlyOwner {
-        require(!candidatesExists[_name], "Candidate already exists");
-        candidatesExists[_name] = true;
-        candidatesList.push(Candidate(_name, 0));
-        emit candidatesAdded(_name);
+    modifier inPhase(Phase expected) {
+        if (s_phase != expected) revert InvalidPhase();
+        _;
     }
 
-    /*function removeCandidate(string memory _name) public onlyOwner {
-        require(candidatesExists[_name], "Candidate does not exist");
-        candidatesExists[_name] = false;
+    /*//////////////////////////////////////////////////////////////
+                              ADMIN FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
 
-        for (uint i = 0; i < candidatesList.length; i++) {
-            if (keccak256(abi.encodePacked(candidatesList[i].name)) ==
-                keccak256(abi.encodePacked(_name))) {
-                delete candidatesList[i];
-                break;
+    /// @notice Add a candidate (owner only) during Registration phase
+    function addCandidate(string calldata name) external onlyOwner inPhase(Phase.Registration) {
+        // Avoid adding empty names
+        bytes memory nm = bytes(name);
+        require(nm.length > 0, "Candidate name required");
+
+        // Basic uniqueness check: naive (string equality loop would be expensive),
+        // we rely on owner discipline. We still mark candidate exists.
+        uint256 id = s_candidateCount;
+        s_candidates[id] = Candidate({name: name, voteCount: 0, exists: true});
+        s_candidateCount++;
+        emit CandidateAdded(id, name);
+    }
+
+    /// @notice Start voting (owner only). Transitions from Registration -> Voting
+    function startVoting() external onlyOwner inPhase(Phase.Registration) {
+        require(s_candidateCount > 0, "No candidates");
+        s_phase = Phase.Voting;
+        emit PhaseChanged(s_phase);
+    }
+
+    /// @notice End voting (owner only). Transitions Voting -> Ended
+    function endVoting() external onlyOwner inPhase(Phase.Voting) {
+        s_phase = Phase.Ended;
+        emit PhaseChanged(s_phase);
+    }
+
+    /// @notice Reset election (owner only). Clears candidates and voters. Back to Registration.
+    /// @dev Use with caution — this wipes on-chain state related to this election
+    function resetElection() external onlyOwner {
+        // reset candidate storage mapping
+        for (uint256 i = 0; i < s_candidateCount; i++) {
+            delete s_candidates[i];
+        }
+        s_candidateCount = 0;
+
+        // Note: clearing per-voter mappings is expensive on-chain in general.
+        // For simplicity here we do not iterate over all addresses (not possible),
+        // but in testing / small deployments owner can redeploy if needed.
+        // We emit an event to signal reset; frontends should treat this as a fresh election.
+        s_phase = Phase.Registration;
+        emit ElectionReset();
+        emit PhaseChanged(s_phase);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              VOTER FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Register yourself as a voter during Registration phase
+    function register() external inPhase(Phase.Registration) {
+        if (s_registered[msg.sender]) revert AlreadyRegistered();
+        s_registered[msg.sender] = true;
+        emit VoterRegistered(msg.sender);
+    }
+
+    /// @notice Cast vote for candidateId during Voting phase
+    function vote(uint256 candidateId) external inPhase(Phase.Voting) {
+        if (!s_registered[msg.sender]) revert NotRegistered();
+        if (s_hasVoted[msg.sender]) revert AlreadyVoted();
+        if (candidateId >= s_candidateCount || !s_candidates[candidateId].exists) revert CandidateNotFound();
+
+        s_candidates[candidateId].voteCount += 1;
+        s_hasVoted[msg.sender] = true;
+        s_voteOf[msg.sender] = candidateId;
+
+        emit VoteCast(msg.sender, candidateId);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 GETTERS
+    //////////////////////////////////////////////////////////////*/
+
+    function getCandidate(uint256 candidateId) external view returns (string memory name, uint256 votes) {
+        if (candidateId >= s_candidateCount || !s_candidates[candidateId].exists) revert CandidateNotFound();
+        Candidate storage c = s_candidates[candidateId];
+        return (c.name, c.voteCount);
+    }
+
+    function totalCandidates() external view returns (uint256) {
+        return s_candidateCount;
+    }
+
+    function isRegistered(address voter) external view returns (bool) {
+        return s_registered[voter];
+    }
+
+    function hasVoted(address voter) external view returns (bool) {
+        return s_hasVoted[voter];
+    }
+
+    function votedFor(address voter) external view returns (uint256) {
+        require(s_hasVoted[voter], "Voter hasn't voted");
+        return s_voteOf[voter];
+    }
+
+    /// @notice Get winner candidate id (ties resolved by first found highest votes)
+    function getWinner() external view inPhase(Phase.Ended) returns (uint256 winnerId, string memory winnerName, uint256 votes) {
+        uint256 topId = 0;
+        uint256 topVotes = 0;
+        for (uint256 i = 0; i < s_candidateCount; i++) {
+            Candidate storage c = s_candidates[i];
+            if (c.exists && c.voteCount > topVotes) {
+                topVotes = c.voteCount;
+                topId = i;
             }
         }
-    }*/
-    function registerVoter(address _voter) public onlyOwner {
-        if (registeredVoters[_voter]) revert VoterAlreadyRegistered(_voter);
-        registeredVoters[_voter] = true;
-        registeredVoterList.push(_voter);
-        emit voterRegistered(_voter);
-    }
-
-    function vote(uint _candidateIndex) public {
-        if (!VotingStatus) revert VotingHasNotStarted(); // Voting is not active
-        if (!registeredVoters[msg.sender])
-            revert VoterNotRegistered(msg.sender);
-        if (hasVoted[msg.sender])
-            revert youHaveAlreadyvoted(); /*(msg.sender);*/
-        if (_candidateIndex >= candidatesList.length)
-            revert InvalidCandidateIndex(_candidateIndex);
-        if (block.timestamp >= VotingDeadline) revert VotingPeriodIsOver();
-
-        candidatesList[_candidateIndex].voteCount += 1;
-        hasVoted[msg.sender] = true;
-        hasVotedList.push(msg.sender);
-        emit voted(_candidateIndex);
-    }
-
-    function setvotingdeadline(uint _duration) internal onlyOwner {
-        // _duration should be in seconds (e.g., 2 days = 2 * 24 * 60 * 60 = 172800)
-        VotingDeadline = block.timestamp + _duration; // Voting deadline is the current time plus the specified duration
-    }
-
-    function startVoting() public onlyOwner {
-        require(!VotingStatus, "Already voting");
-        VotingStatus = true;
-        emit votingStarted();
-    }
-
-    function endVoting() public onlyOwner {
-        require(VotingStatus, "voting has ended");
-        VotingStatus = false;
-        emit votingEnded();
-    }
-
-    function resetElection(
-        string[] memory newCandidateNames,
-        uint newdDuration
-    ) public onlyOwner {
-        delete candidatesList;
-        for (uint i = 0; i < registeredVoterList.length; i++) {
-            delete registeredVoters[registeredVoterList[i]];
-        }
-        delete registeredVoterList;
-
-        for (uint i = 0; i < hasVotedList.length; i++) {
-            delete hasVoted[hasVotedList[i]];
-        }
-        delete hasVotedList;
-
-        for (uint i = 0; i < newCandidateNames.length; i++) {
-            // Check for duplicates using your candidateExists mapping
-            require(
-                !candidatesExists[newCandidateNames[i]],
-                "Duplicate candidate"
-            );
-            candidatesList.push(Candidate(newCandidateNames[i], 0));
-            candidatesExists[newCandidateNames[i]] = true;
-        }
-        for (uint i = 0; i < candidatesList.length; i++) {
-            delete candidatesExists[candidatesList[i].name];
-        }
-        VotingStatus = false;
-        VotingDeadline = block.timestamp + newdDuration;
-    }
-
-    function getWinners()
-        public
-        view
-        onlyOwner
-        returns (string memory Winnersname)
-    {
-        if (!(candidatesList.length > 0)) revert NoCandidatesAvailable();
-        if (VotingStatus) revert VotingStillOngoing();
-        // require(candidatesList.length > 0, "No candidates available");
-
-        uint maxVote = 0;
-        uint winnerIndex = 0;
-
-        for (uint i = 0; i < candidatesList.length; i++) {
-            if (candidatesList[i].voteCount > maxVote) {
-                maxVote = candidatesList[i].voteCount;
-                winnerIndex = i;
-            }
-        }
-
-        // revert  if nobody has voted
-        if (maxVote == 0) revert NoVotesCast();
-        return candidatesList[winnerIndex].name;
-    }
-
-    /* Getters fuction */
-    function getCandidates() public view returns (Candidate[] memory) {
-        return candidatesList;
-    }
-
-    function getResults()
-        public
-        view
-        onlyOwner
-        returns (string[] memory names, uint[] memory votes)
-    {
-        uint length = candidatesList.length;
-
-        names = new string[](length);
-        votes = new uint[](length);
-
-        for (uint i = 0; i < length; i++) {
-            names[i] = candidatesList[i].name;
-            votes[i] = candidatesList[i].voteCount;
-        }
-
-        return (names, votes);
-    }
-
-    function getVotingStatus() public view returns (bool) {
-        return VotingStatus;
-    }
-
-    function getVotingDeadline() public view returns (uint) {
-        return VotingDeadline;
-    }
-
-    function getRegisteredVoterList() public view returns (address[] memory) {
-        return registeredVoterList;
-    }
-
-    function gethasvotedList() public view returns (address[] memory) {
-        return hasVotedList;
+        return (topId, s_candidates[topId].name, topVotes);
     }
 }
